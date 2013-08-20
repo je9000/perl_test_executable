@@ -1,0 +1,306 @@
+=head1 SUMMARY
+
+perl_test_executable is a package designed to make unit testing of executable
+perl scripts easier. Instead of having to refactor functions out of the
+executable and into a supporting module, perl_test_executable allows direct
+testing of functions defined inside an executable script without actually
+running that executable.
+
+=head1 EXAMPLES
+
+For example, say you've got the following executable perl script:
+
+ #!/usr/local/bin/perl
+ # testme.pl
+
+ use warnings;
+ use strict;
+
+ my $I_LIKE_FRACTIONAL_TACOS = 0;
+ my $cash;
+ my $taco_price;
+
+ sub how_many_tacos_can_i_afford {
+     my ( $spend_me, $taco_price ) = @_;
+     if ( $spend_me !~ /^\d+(?:\.\d+)?$/ ) { return undef; }
+     if ( $taco_price !~ /^\d+(?:\.\d+)?$/ ) { return undef; }
+
+     if ( $I_LIKE_FRACTIONAL_TACOS ) {
+         return $spend_me / $taco_price;
+     } else {
+         return int( $spend_me / $taco_price );
+     }
+ }
+
+ print "How much cash do you have: ";
+ $cash = <>;
+ print "How much does a taco cost: ";
+ $taco_price = <>;
+
+ chomp( $cash );
+ chomp( $taco_price );
+
+ print "\nYou can afford " . how_many_tacos_can_i_afford( $cash, $taco_price ) . " tacos! Yay!\n";
+
+This script looks pretty good, but it needs unit tests. Unfortunately, running
+this script requires input from STDIN, and while this could be handled via
+expect, it would be better to test the functions directly. Traditionally, best
+practices would be to break the function "how_many_tacos_can_i_afford" out into
+a supporting module, and then have the unit tests load and test that module.
+
+A better option is to use perl_test_executable, which lets you write unit tests
+directly for the defined function "how_many_tacos_can_i_afford". For example,
+with perl_test_executable, you could write a test script like this:
+
+ #!/usr/local/bin/perl
+ # tests.pl
+ 
+ use warnings;
+ use strict;
+ use Test::Simple tests => 3;
+ 
+ ok( how_many_tacos_can_i_afford( 100, 20 ) == 5, 'Good data' );
+ ok( !defined how_many_tacos_can_i_afford( 'invalid', 20 ), 'Invalid cash' );
+ ok( !defined how_many_tacos_can_i_afford( 100, 'invalid' ), 'Invalid price' );
+
+When run via perl_test_executable, the following output would be produced:
+
+ % perl_test_executable -p testme.pl -t tests.pl
+ 1..3
+ ok 1 - Good data
+ ok 2 - Invalid cash
+ ok 3 - Invalid price
+
+This output implies that the tests were run successfully against the function
+defined in "testme.pl". Tests can be written using Test::Simple, Test::More,
+or any other test module. In fact, any modules can be loaded or used,
+functionality is not limited to providing a testing infrastructure, though
+that was the original intent.
+
+=head1 BEGIN AND END BLOCKS
+
+While the main body of the tested script is not executed, both BEGIN and END
+blocks are run. If END blocks must not be run in the tested script, the test
+script can install an END block which calls the _exit function from the
+L<POSIX> module, which will prevent all other END blocks from being run.
+However this may trigger other undesirable actions, and will conflict with
+L<Devel::Cover>. Please see the documentation for POSIX::_exit.
+
+=head1 GLOBAL VARIABLES
+
+Any global variables defined with my() in the target script will be created
+but not initialized when the test script is run. If global variables are
+relied on by your tests, you will need to set each one in your test script.
+
+Accessing global variables in the tested executable is possible via a special
+declaration of $_ in the test script. When the test script starts, $_ will be
+initialized to a hashref with each key set to the full name of a global
+variable in the tested executable, and each key's value set to a reference to
+undef. In order to modify a global variable, you must set its de-referenced
+value in this hash. For example, we could alter the "tests.pl" script
+referenced above like this:
+
+ #!/usr/local/bin/perl
+ # tests.pl
+
+ my $tested_globals = $_;
+
+ use warnings;
+ use strict;
+ use Test::Simple tests => 1;
+
+ ${ $tested_globals->{'$I_LIKE_FRACTIONAL_TACOS'} } = 1;
+
+ ok( how_many_tacos_can_i_afford( 100, 40 ) == 2.5, 'Fractional tacos' );
+
+When run via perl_test_executable, the following output would be produced:
+
+ % perl_test_executable -p testme.pl -t tests.pl
+ 1..1
+ ok 1 - Fractional tacos
+
+It is recommended that you copy the contents of $_ (the reference to a hash)
+into another variable as soon as possible in your test script, before it can
+be overwritten.
+
+The syntax for setting various types of global variables can be somewhat
+obtuse, so here are some hints on how to set various types of globals in the
+tested executable from the test script (assuming $tested_globals is
+initialized like above):
+
+ # Scalars
+ ${ $tested_globals->{'$simple_scalar'} } = 1234;
+ undef ${ $tested_globals->{'$simple_scalar'} };
+
+ # Hashes
+ $tested_globals->{'%simple_hash'}->{'key0'} = 0;
+ %{ $tested_globals->{'%simple_hash'} } = ( key1 => 1, key2 => 2 );
+ @k = keys %{ $tested_globals->{'%simple_hash'} };
+
+ # Arrays
+ @{ $tested_globals->{'@simple_array1'} } = ( 1, 2 );
+ $tested_globals->{'@simple_array1'}->[3] = 3;
+ push @{ $tested_globals->{'@a'} }, 4;
+
+ # References
+ ${ $tested_globals->{'$hash_ref'} } = { key0 => 0, key1 => 1 };
+ @k = keys %{ ${ $tested_globals->{'$hash_ref'} } };
+ ${ $tested_globals->{'$array_ref'} } = [ 0, 1 ];
+ push @{ ${ $tested_globals->{'$array_ref'} } }, 2;
+
+ # File handles - Note: the value of the global must be undefined before the
+ #                      call to open().
+ open( ${ $tested_globals->{'$file_handle'} }, '<', $0 );
+
+ # Objects - Note You don't need to load a module (like IO::File) if the
+ #           executable you are testing loads it for you.
+ ${ $tested_globals->{'$object'} } = IO::File->new($0);
+
+Global variables created by our() can be accessed by declaring a variable of
+the same name in your test script with our(). You can then access that
+variable as normal.
+
+=head1 USE WITH DEVEL::COVER
+
+perl_test_executable has the ability to start the scripts with Devel::Cover
+loaded via the "-C" flag. The default Devel::Cover options will be used.
+Devel::Cover must be installed for this option to work. See L<Devel::Cover>
+for details.
+
+=head1 SUPPORTED PERL VERSIONS
+
+perl_test_executable currently dynamically linked with Perl 5.8 on FreeBSD and
+statically linked with Perl 5.8 on RHEL. In the future, different
+configurations may be offered.
+
+=head1 USAGE
+
+The following flags are supported by perl_test_executable:
+
+=over
+
+=item -p
+
+Perl script file to test, required unless using "-c".
+
+=item -t
+
+Perl script file containing tests (or other code) to run, required unless
+using "-c".
+
+=item -e
+
+Code to evaluate after file to test is loaded but before tests are run.
+Probably only useful when debugging your tests or perl_test_executable.
+
+=item -c
+
+Perl script to compile (but not run), just like "perl -c". Required without
+"-t" and "-p".
+
+=item -C
+
+Load Devel::Cover before loading either Perl scripts in order to report code
+coverage metrics. Devel::Cover must already be installed for this to work.
+
+=item -O
+
+Specifies additional flags to pass to Devel::Cover, if -C is used, in comma-
+separated format. For example:
+
+-O -silent,1
+
+Would run Devel::Cover as:
+
+-MDevel::Cover=-silent,1
+
+=item -M
+
+Specifies a module to load when loading the script to be tested. Useful for
+overriding Perl built in functions used in the tested script. See "Overriding
+Built-in Functions" in perlsub.
+
+=item -h
+
+Terse usage information.
+
+
+=back
+
+=head1 IMPLEMENTATION DETAILS
+
+As part of the implementation of this testing framework, the test script to be
+executed is run inside of an "eval" block. Unfortunately, this puts the test
+script in an environment not completely like a standard execution environment,
+namely, in that it's allowed to "return" from outside any subroutines or other
+normally "return"-able blocks. Additionally, the returned value, generally the
+result of the last statement executed in the test script, is examined to
+determine whether or not the "eval" statement was successful.
+
+In order to work around these issues, a "canary" "return" statement is placed
+temporarily at the end of the test script, and this "canary" value is checked
+after the test script returns. If the "canary" value is not found, an error
+message is printed listing the possible causes of the problem. Unfortunately,
+this "canary" can not detect every instance of every problem, so test
+developers will still need to be cautious to avoid calling "return" from
+outside of a subroutine or other "return"-able block.
+
+Additionally, test scripts containing "__DATA__" or "__END__" tokens (or any
+other token that is interpreted as ending at EOF) will cause this "canary"
+check to fail, and possibly print a cryptic error message.
+
+=head1 CHANGES
+
+=head2 20100712, 0.9 - jeagle
+
+Cleanups for release as open source.
+
+=head2 20100122, 0.8 - jeagle
+
+No longer reports code coverage for script containing tests when using
+Devel::Cover.
+
+Add -O switch to pass additional options to Devel::Cover.
+
+Added work-around to catch misbehaving tests that call "return" from outside a
+subroutine or other "return"-able block.
+
+Support test scripts that "return" an undefined value. See "Implementation
+Details" for more information.
+
+=head2 20090914, 0.7 - jeagle
+
+Add -M switch to allow loading of modules, update documentation for this
+switch.
+
+=head2 20090824, 0.6 - jeagle
+
+Fix crash bug on FreeBSD caused by closing stdin/stdout/stderr.
+
+Correctly return exit status set by test script.
+
+=head2 20090819, 0.5 - jeagle
+
+Add "-c", "-C", and "-e" flags.
+
+Check test script before attempting to run it, which enables us to return a
+more intelligent error message when the test script fails to compile.
+
+=head2 20090813, 0.4 - jeagle
+
+Add support for setting global variables used in tested executable.
+
+=head2 20090731, 0.3 - jeagle
+
+Correctly ignore invalid errors.
+
+Again improve reliability of die() message catching.
+
+=head2 20090730, 0.2 - jeagle
+
+Correctly catch and propagate die() messages.
+
+=head2 20090729, 0.1 - jeagle
+
+Inital release.
+
